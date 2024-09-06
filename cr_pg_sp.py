@@ -15,15 +15,6 @@ from google.auth.transport.requests import AuthorizedSession
 from google.resumable_media import requests, common
 from google.cloud import storage
 
-from flask import request, jsonify
-import datetime as dt
-import json
-import logging
-import os
-import stat
-import psycopg2
-from google.cloud import storage
-
 logging.basicConfig(level=INFO)
 gcp_cloud_run_stored_proc = Flask(__name__)
 
