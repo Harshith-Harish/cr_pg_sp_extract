@@ -1,0 +1,15 @@
+{
+	"host_ip" : "<secret_manager_path>",
+	"db_username" : "<secret_manager_path>",
+	"db_password" : "<secret_manager_path>", 
+	"database" : "<secret_manager_path>", 
+	"port" : "<secret_manager_path>",
+	"stored_procedure" : "sp(1,2,3)",	
+	"server_cert" : "<secret_manager_path>", 
+	"client_cert" : "<secret_manager_path>",
+	"view" : "view_name", 
+	"client_key_cert" : "<secret_manager_path>", 
+	"gcs_extract_bucket" : "bucket_name",
+	"gcs_extract_path" : "folder_name/", 
+	"function_name" : "function_name" 	
+}  
