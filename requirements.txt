@@ -1,11 +1,9 @@
 Flask
 gunicorn
-psycopg2-binary
+psycopg2
 google-cloud-secret-manager
 google-cloud-storage
-fsspec
 gcsfs
 google-resumable-media
 google-auth
 Werkzeug
-pytz
