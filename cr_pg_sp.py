@@ -1,10 +1,11 @@
 import psycopg2
-import time
+import datetime as dt
 import json
 import logging
-import stat
-import sys
 import os
+import stat
+import psycopg2
+import sys
 import datetime as dt
 from flask import Flask, request, jsonify
 from distutils.log import INFO
@@ -12,6 +13,15 @@ from google.cloud import secretmanager
 from google.cloud import storage
 from google.auth.transport.requests import AuthorizedSession
 from google.resumable_media import requests, common
+from google.cloud import storage
+
+from flask import request, jsonify
+import datetime as dt
+import json
+import logging
+import os
+import stat
+import psycopg2
 from google.cloud import storage
 
 logging.basicConfig(level=INFO)
@@ -97,180 +107,152 @@ class objectstreamupload(object):
 storage_client = storage.Client()
 
 #Function To Read Secret Details From  SM
-def fetch_secret(id):
+def fetch_secret(secret_id):
     client = secretmanager.SecretManagerServiceClient()
-    id = {"name": f"{id}/versions/latest"}
+    name = f"projects/YOUR_PROJECT_ID/secrets/{secret_id}/versions/latest"  # Update YOUR_PROJECT_ID
     try:
-        response = client.access_secret_version(id)
+        response = client.access_secret_version(name=name)
+        return response.payload.data.decode("UTF-8")
     except Exception as e:
-        logging.error("Failed to Get SM for key : "+str(id))
-        sys.exit(1)
-    return response.payload.data.decode("UTF-8")
+        logging.error(f"Failed to get secret for key {secret_id}: {e}")
+        raise  # Re-raise exception to be handled by the calling function
    
    
 
 #Function to read config file and return dict
 def fetch_conf_details(bucket_name, conf_file_name):
-    logging.info("Reading config file from cloud storage : "+str(conf_file_name))
-    bucket = storage_client.get_bucket(bucket_name)
+    logging.info(f"Reading config file from cloud storage: {conf_file_name}")
+    client = storage.Client()  # Ensure storage_client is properly initialized here
+    bucket = client.get_bucket(bucket_name)
     try:
         blob = bucket.blob(conf_file_name)
         with blob.open("r") as file:
-            file_content =  file.read()
+            file_content = file.read()
+        return file_content
     except Exception as e:
-        logging.error("Failed to read config File : "+str(conf_file_name))
-        logging.error(e)
-        sys.exit(1)
-    return file_content
+        logging.error(f"Failed to read config file {conf_file_name}: {e}")
+        raise  # Re-raise exception to be handled by the calling function
 
 
 #gs://pg_procedure_py/scripts/config_file.json
 #End Point For Loading Delimieted File
-@gcp_cloud_run_stored_proc.route("/stored_proc" , methods = ['GET'])    
+@gcp_cloud_run_stored_proc.route("/stored_proc", methods=['GET'])
 def sp_call():
+    # Get current timestamp
+    file_time_stamp = dt.datetime.now().strftime('%Y%m%d%H%M%S')
 
-    file_time_stamp = dt.datetime.strptime(str(dt.datetime.now()), '%Y-%m-%d %H:%M:%S.%f').strftime('%Y%m%d%H%M%S')
-    
+    # Read configuration file path from request
     try:
         conf_path = request.args.get('conf_path')
-        logging.info(" Reading Config File From Path : "+str(conf_path))    
-        bucket_name = str(conf_path).split("/")[2]
-        conf_file_path = str(conf_path).split(bucket_name)[-1] #
+        if not conf_path:
+            raise ValueError("Configuration path not provided")
+        logging.info(f"Reading Config File From Path: {conf_path}")
+        
+        bucket_name, conf_file_path = conf_path.split("/", 2)[2], conf_path.split("/", 2)[-1]
+        conf_file_name = conf_file_path.lstrip("/")
     except Exception as e:
-        logging.error("Invalid Request... : "+str(e))
-        sys.exit(1)    
-   
-    #Removing first / from path
-    conf_file_name= conf_file_path.replace("/","", 1)
-   
-    #Read Config File Details
+        logging.error(f"Invalid Request: {e}")
+        return jsonify({"error": str(e)}), 400
+
+    # Read configuration details
     try:
         conf_details = fetch_conf_details(bucket_name, conf_file_name)
         conf_dict = json.loads(conf_details)
     except Exception as e:
-        logging.error("Failed reading the conf file : "+str(e))
-        sys.exit(1)
+        logging.error(f"Failed reading the configuration file: {e}")
+        return jsonify({"error": "Configuration file read failed"}), 500
 
-    try:    
-        host_ip = conf_dict.get('host_ip')
-        db_username = conf_dict.get('db_username')
-        db_password = conf_dict.get('db_password')
-        database =  conf_dict.get('database')
-        port = conf_dict.get('port')
-        server_cert = conf_dict.get('server_cert')
-        client_cert = conf_dict.get('client_cert')
-        client_key_cert = conf_dict.get('client_key_cert')
-        gcs_extract_bucket = conf_dict.get('gcs_extract_bucket')
-        gcs_extract_path = conf_dict.get('gcs_extract_path')
-        stored_procedure = conf_dict.get('stored_procedure')
-        view = conf_dict.get('view')
-        function_name = conf_dict.get('function_name')
-        #table_name = conf_dict.get('table_name')
-    except Exception as e:
-        logging.error("Failed reading the conf file : "+str(e))
-        sys.exit(1)
-
-    #Reading configuration and SSl from SM
+    # Extract configuration details
     try:
-        host_ip=fetch_secret(host_ip)
-        db_username=fetch_secret(db_username)
-        db_password=fetch_secret(db_password)
-        database=fetch_secret(database)
-        port=fetch_secret(port)
-        server_cert = fetch_secret(server_cert)
-        client_cert = fetch_secret(client_cert)
-        client_key_cert = fetch_secret(client_key_cert)
+        config_keys = ['host_ip', 'db_username', 'db_password', 'database', 'port',
+                        'server_cert', 'client_cert', 'client_key_cert', 
+                        'gcs_extract_bucket', 'gcs_extract_path', 'stored_procedure', 
+                        'view', 'function_name']
+        config_values = {key: conf_dict.get(key) for key in config_keys}
+        
+        if None in config_values.values():
+            raise ValueError("Some configuration values are missing")
+
+        # Fetch secrets from secret manager
+        for key in ['host_ip', 'db_username', 'db_password', 'database', 'port',
+                    'server_cert', 'client_cert', 'client_key_cert']:
+            config_values[key] = fetch_secret(config_values[key])
+        
+        # Define file names for certificates
+        root_cert_file_name = "/tmp/root_cert.pem"
+        client_cert_file_name = "/tmp/client_cert.pem"
+        client_cert_key_file_name = "/tmp/client_key_cert.pem"
+
+        # Write certificates to files
+        with open(root_cert_file_name, "w") as f:
+            f.write(config_values['server_cert'])
+        with open(client_cert_file_name, "w") as f:
+            f.write(config_values['client_cert'])
+        with open(client_cert_key_file_name, "w") as f:
+            f.write(config_values['client_key_cert'])
+
+        # Set file permissions
+        for file_name in [root_cert_file_name, client_cert_file_name, client_cert_key_file_name]:
+            os.chmod(file_name, stat.S_IREAD)
+
     except Exception as e:
-        logging.error('Error occured reading from secret manager : '+str(e))
-        sys.exit(1)
+        logging.error(f"Error processing configuration or secrets: {e}")
+        return jsonify({"error": "Configuration processing failed"}), 500
 
-    #.pem files
-    with open(root_cert_file_name, "w") as f1:
-        f1.write(server_cert)
-   
-    with open(client_cert_file_name, "w") as f1:
-        f1.write(client_cert)
-   
-    with open(client_cert_key_file_name, "w") as f1:
-        f1.write(client_key_cert)
-
-    os.chmod(root_cert_file_name, stat.S_IREAD)
-    os.chmod(client_cert_file_name, stat.S_IREAD)
-    os.chmod(client_cert_key_file_name, stat.S_IREAD)
-    #filemode = stat.S_IMODE(os.stat(client_cert_key_file_name).st_mode)
-
-
-    logging.info("host_ip : "+str(host_ip))
-    logging.info("database : "+str(database))
-    logging.info("db_username : "+str(db_username))
-    logging.info("db_password : "+str(db_password))
-    logging.info("port : "+str(port))
-    logging.info("gcs_extract_bucket : "+str(gcs_extract_bucket))
-    logging.info("gcs_extract_path : "+str(gcs_extract_path))
-    logging.info("stored_procedure : "+str(stored_procedure))
-    logging.info("function_name : "+str(function_name))
-    logging.info("view : "+str(view))
-    logging.info("table_name : "+str(table_name))
-   
-    connection_established = False
+    # Establish database connection
     try:
-        if not connection_established:
-            conn = psycopg2.connect(host=host_ip, user=db_username, password=db_password, dbname=database, port=port, sslmode='verify-ca', sslrootcert=root_cert_file_name, sslcert=client_cert_file_name, sslkey=client_cert_key_file_name)
-            cursor = conn.cursor()
-            conn = conn
-            conn.autocommit = True
-           
-            connection_established = True
+        conn = psycopg2.connect(
+            host=config_values['host_ip'],
+            user=config_values['db_username'],
+            password=config_values['db_password'],
+            dbname=config_values['database'],
+            port=config_values['port'],
+            sslmode='verify-ca',
+            sslrootcert=root_cert_file_name,
+            sslcert=client_cert_file_name,
+            sslkey=client_cert_key_file_name
+        )
+        conn.autocommit = True
+        cursor = conn.cursor()
     except (Exception, psycopg2.DatabaseError) as error:
-        logging.error("Failed creating connection with PostgreSQL.")
-        logging.error(error)
-        sys.exit(1)      
+        logging.error(f"Failed to connect to PostgreSQL: {error}")
+        return jsonify({"error": "Database connection failed"}), 500
 
-    #Calling Stored Procedure
+    # Call the stored procedure
     try:
-        cursor.execute("CALL "+stored_procedure+ " ;")
-        logging.info("--------------------------------------------")
+        cursor.execute(f"CALL {config_values['stored_procedure']};")
         conn.commit()
     except (Exception, psycopg2.DatabaseError) as error:
-        logging.error("Failed to call stored procedure.")
-        logging.error(error)
+        logging.error(f"Failed to call stored procedure: {error}")
         conn.rollback()
-        cursor.close()
-        sys.exit(1)
-       
-    #Export the updated data to csv.
+        return jsonify({"error": "Stored procedure execution failed"}), 500
+
+    # Export data to GCS
     try:
-        cursor.execute("Select * from "+view+";")
+        cursor.execute(f"SELECT * FROM {config_values['view']};")
         rows = cursor.fetchall()
-        #Fetchi Column Names
         column_names = [desc[0] for desc in cursor.description]
         updated_column_names = ','.join(column_names)
-       
-        #File Path to store CSV
-        gcs_export_file_path = gcs_extract_path + view +"_"+file_time_stamp+".csv"
-       
-        #Convert Rows to CSV data
-        #csv_data = updated_column_names+"\n"+"\n".join([",".join(map(str, row)) for row in rows])
-        csv_data = updated_column_names+"\n"+"\n".join([",".join(map(lambda x::str(x).replace(",",""),row)) for row in rows])
-        
-        #to load small size files to GCS uncomment below block of code
-        #bucket = storage_client.get_bucket(gcs_extract_bucket)
-        #blob = bucket.blob(gcs_export_file_path)
-        #blob.upload_from_string(csv_data, content_type="text/csv")
-        #logging.info("View Data successfully exported to GCS bucket!!!!!!")
-        
-        with objectstreamupload(client=storage_client, bucket_name= gcs_extract_bucket, blob_name= gcs_export_file_path) as t:
-            t.write(bytes(csv_data,'UTF-8'))
-        logging.info("View Data successfully exported to GCS bucket!!!!!!")
-         
-    except (Exception, psycopg2.DatabaseError) as error:
-        logging.error("Failed exporting data to GCS bucket")
-        logging.error(error)
-        conn.rollback()
-        conn.close()
-        sys.exit(1)
 
-    return "success"
+        csv_data = updated_column_names + "\n" + "\n".join([",".join(map(lambda x: str(x).replace(",", ""), row)) for row in rows])
+
+        gcs_export_file_path = f"{config_values['gcs_extract_path']}/{config_values['view']}_{file_time_stamp}.csv"
+
+        # Upload to GCS
+        storage_client = storage.Client()
+        bucket = storage_client.bucket(config_values['gcs_extract_bucket'])
+        blob = bucket.blob(gcs_export_file_path)
+        blob.upload_from_string(csv_data, content_type="text/csv")
+
+        logging.info("View Data successfully exported to GCS bucket")
+    except (Exception, psycopg2.DatabaseError) as error:
+        logging.error(f"Failed exporting data to GCS: {error}")
+        conn.rollback()
+        return jsonify({"error": "Data export to GCS failed"}), 500
+    finally:
+        conn.close()
+
+    return "Success", 200
    
    
 
